@@ -62,9 +62,9 @@ class ChameleonDefense(Defense):
 
         # Save to a npz file for evaluation
 
-        _root = Path(__file__).resolve().parents[2]
-        _chameleon_dir = _root / "defense_results" / "chameleon"
-        _chameleon_dir.mkdir(parents=True, exist_ok=True)
+        # _root = Path(__file__).resolve().parents[2]
+        # _chameleon_dir = _root / "defense_results" / "chameleon"
+        # _chameleon_dir.mkdir(parents=True, exist_ok=True)
         # _npz_path = _chameleon_dir / f"selected_traces_and_idx_set_{args.dataset}.npz"
         # np.savez_compressed(_npz_path, selected_traces=selected_traces, idx_set=idx_set)
         # self.logger.info("Saved selected traces and idx_set to %s", _npz_path)
@@ -82,7 +82,7 @@ class ChameleonDefense(Defense):
         #     json.dump(payload, f)
         # self.logger.info("Saved selected traces and idx_set to %s", _json_path)
 
-        exit()
+        # exit()
 
         idx_arr = np.asarray(idx_set, dtype=int)
         self.traces_idx: Dict[int, np.ndarray] = {
@@ -118,18 +118,6 @@ class ChameleonDefense(Defense):
         self.selected_idx_set = np.asarray(idx_set, dtype=int)
         self.radix_trie: RadixTrie | None = None
 
-        # self.plot_radix_trie_performance_3d()
-
-    # def __getstate__(self) -> Dict[str, object]:
-    #     # Multiprocessing pickles the defense; a built RadixTrie is a deep TrieNode
-    #     # tree and can exceed pickle's recursion limit. Workers rebuild via
-    #     # ensure_radix_trie().
-    #     state = self.__dict__.copy()
-    #     state["radix_trie"] = None
-    #     return state
-
-    # def __setstate__(self, state: Dict[str, object]) -> None:
-    #     self.__dict__.update(state)
 
     def ensure_radix_trie(self) -> None:
         """
@@ -144,136 +132,6 @@ class ChameleonDefense(Defense):
         for i in range(n):
             truncated[i] = np.asarray(self.direction_traces[i], dtype=int)[:cap]
         self.radix_trie = RadixTrie(truncated, self.selected_data_labels)
-
-    # def plot_radix_trie_performance_3d(
-    #     self,
-    #     data_traces: Optional[np.ndarray] = None,
-    #     output_path: Optional[Union[str, os.PathLike]] = None,
-    #     match_threshold: int = 5,
-    #     max_data_traces: Optional[int] = 1024,
-    # ) -> None:
-    #     """
-    #     Visualize radix-trie prefix ambiguity on original monitored traces.
-
-    #     For each index ``i`` (prefix length ``i + 1``, capped by
-    #     ``radix_trie_build_length``), query the trie built from
-    #     ``self.direction_traces`` and count how many distinct pool traces extend
-    #     the prefix. If that count is below ``match_threshold``, the prefix is
-    #     "sparse". The z coordinate is ``m``: over all data traces, how many
-    #     traces are sparse at index ``i``. Each sparse cell contributes one 3D
-    #     point ``(i, T[i, 0], m)``.
-
-    #     Parameters
-    #     ----------
-    #     data_traces
-    #         Traces to analyze; defaults to ``self.data_traces`` (all monitored
-    #         originals). Pass a subset to speed up experiments.
-    #     output_path
-    #         Where to save the PNG. Default:
-    #         ``defense_results/chameleon/radix_trie_performance_3d.png`` under
-    #         the project ``src`` parent.
-    #     match_threshold
-    #         Sparse if the number of matched direction traces is strictly less
-    #         than this value (default 5).
-    #     max_data_traces
-    #         If set, only the first this many rows of ``data_traces`` are used
-    #         (default 1024). Use ``None`` for all traces (can be slow).
-    #     """
-    #     # PNG plotting needs matplotlib; CSV export does not.
-    #     plt = None
-    #     try:
-    #         import matplotlib
-
-    #         matplotlib.use("Agg")
-    #         import matplotlib.pyplot as plt
-    #     except ImportError:
-    #         pass
-
-    #     self.ensure_radix_trie()
-    #     assert self.radix_trie is not None
-
-    #     pool = self.data_traces if data_traces is None else data_traces
-    #     pool = np.asarray(pool, dtype=object)
-    #     if max_data_traces is not None and int(max_data_traces) > 0:
-    #         pool = pool[: int(max_data_traces)]
-
-    #     cap = int(self.config.radix_trie_build_length)
-
-    #     def _uniq_match_count(directions_prefix: np.ndarray) -> int:
-    #         pairs = self.radix_trie.trace_match(directions_prefix)
-    #         return len({int(tid) for _, tid in pairs if int(tid) >= 0})
-
-    #     sparse_traces_at_i: Dict[int, int] = defaultdict(int)
-    #     for tr in pool:
-    #         T = np.asarray(tr, dtype=float)
-    #         if T.ndim != 2 or T.shape[0] < 1 or T.shape[1] < 2:
-    #             continue
-    #         dirs = pack_directions(T[:, 1])
-    #         n = min(int(T.shape[0]), int(dirs.size), cap)
-    #         for i in range(n):
-    #             pref = dirs[: i + 1]
-    #             if _uniq_match_count(pref) < match_threshold:
-    #                 sparse_traces_at_i[i] += 1
-
-    #     xs: List[float] = []
-    #     ys: List[float] = []
-    #     zs: List[float] = []
-    #     for tr in pool:
-    #         T = np.asarray(tr, dtype=float)
-    #         if T.ndim != 2 or T.shape[0] < 1 or T.shape[1] < 2:
-    #             continue
-    #         dirs = pack_directions(T[:, 1])
-    #         n = min(int(T.shape[0]), int(dirs.size), cap)
-    #         for i in range(n):
-    #             pref = dirs[: i + 1]
-    #             if _uniq_match_count(pref) < match_threshold:
-    #                 m_i = sparse_traces_at_i[i]
-    #                 xs.append(float(i))
-    #                 ys.append(float(T[i, 0])/100)
-    #                 zs.append(float(m_i))
-
-
-    #     root = Path(__file__).resolve().parents[2]
-    #     save_path = (
-    #         root
-    #         / "defense_results"
-    #         / "chameleon"
-    #         / f"radix_trie_performance_3d_{self.args.dataset}_CW.csv"
-    #     )
-    #     save_path.parent.mkdir(parents=True, exist_ok=True)
-    #     with open(save_path, "w", newline="") as f:
-    #         writer = csv.writer(f)
-    #         writer.writerow(["x", "y", "z"])
-    #         for x, y, z in zip(xs, ys, zs):
-    #             writer.writerow([x, y, z])
-    #     exit()
-
-        # if not xs:
-        #     return
-
-        # if output_path is None:
-        #     root = Path(__file__).resolve().parents[2]
-        #     out = root / "defense_results" / "chameleon" / "radix_trie_performance_3d.png"
-        # else:
-        #     out = Path(output_path)
-        # out.parent.mkdir(parents=True, exist_ok=True)
-
-        # fig = plt.figure(figsize=(9, 6))
-        # ax = fig.add_subplot(projection="3d")
-        # sc = ax.scatter(xs, ys, zs, c=zs, cmap="viridis", alpha=0.55, s=8)
-        # label_kw = {"fontsize": 18, "labelpad": 14}
-        # ax.set_xlabel("Prefix Matched Location", **label_kw)
-        # ax.set_ylabel("Timestamp (s)", **label_kw)
-        # ax.set_zlabel("Number of traces", **label_kw)
-        # tick_kw = {"labelsize": 16, "pad": 8}
-        # ax.tick_params(axis="x", **tick_kw)
-        # ax.tick_params(axis="y", **tick_kw)
-        # ax.tick_params(axis="z", **tick_kw)
-        # fig.colorbar(sc, ax=ax, shrink=0.55)
-        # fig.tight_layout()
-        # fig.savefig(out, dpi=150)
-        # plt.close(fig)
-        # exit()
 
   
 
