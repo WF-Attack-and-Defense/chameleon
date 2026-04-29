@@ -1,10 +1,6 @@
 # Chameleon: Robust Website Fingerprinting Defense via Many-to-Many Traffic Morphing
 To support the latest graphic devices, we tested the code under both Python 3.10+. The conda environment I provided is based on Python 3.10 with PyTorch 2.8 and CUDA 12.8.
 
-> We will continue to maintain this project. Welcome to expand this list by:
-> - Opening an issue or pull request
-> - Adding more defense or attack models
-> - To assist future researchers, we welcome any suggestions for improving this project.
 
 ## How to use
 ### Install dependencies
