@@ -1,6 +1,7 @@
 # Chameleon: Robust Website Fingerprinting Defense via Many-to-Many Traffic Morphing
-To support the latest graphic devices, we tested the code under both Python 3.10+. The conda environment I provided is based on Python 3.10 with PyTorch 2.8 and CUDA 12.8.
+To support the latest graphics devices, we tested the code under Python 3.10+. The conda environment I provided is based on Python 3.10 with PyTorch 2.8 and CUDA 12.8.
 
+:warning: :warning: :warning: This software is a research prototype intended solely for experimental and evaluation purposes. :warning: :warning: :warning:
 
 ## How to use
 ### Install dependencies
@@ -53,7 +54,7 @@ Open World:$ python run_defense.py --defense gapdis --config-path ./defenses/con
 ```
 
 ### Simulate WF defense without adversarial training
-To run WF defense without adversarial training, first run Closed- or Open world training to get training models.
+To run WF defense without adversarial training, first run Closed- or open-world training to get training models.
 1. Closed-world:
 ```bash
 python run_defense_without_adv.py --defense chamemeon --dataset DF --attack df
