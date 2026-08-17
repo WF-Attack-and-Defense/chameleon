@@ -22,7 +22,7 @@ A is the class number of the trace, and B is the instance number of the trace.
 
 Extract sample dataset
 ```
-tar -xJf ds-19.tar.xz
+tar -xJf sample.tar.xz
 ```
 
 #### Defended dataset generation
