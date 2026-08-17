@@ -178,6 +178,17 @@ def feature_transform(sample: np.ndarray, feature_type: str, seq_length: int) ->
     return np.transpose(feat, (1, 0))
 
 
+def parse_cw_instance_from_path(path: Union[str, os.PathLike], suffix: str = ".cell") -> int:
+    """Parse instance id from a closed-world trace path ``{class}-{instance}.cell``."""
+    stem = os.path.basename(str(path)).replace(suffix, "")
+    return int(stem.split("-", 1)[1])
+
+
+def parse_ow_instance_from_path(path: Union[str, os.PathLike], suffix: str = ".cell") -> int:
+    """Parse instance id from an open-world trace path ``{instance}.cell``."""
+    return int(os.path.basename(str(path)).replace(suffix, ""))
+
+
 def get_flist_label(mon_path: Union[str, os.PathLike], unmon_path: Union[str, os.PathLike, None] = None,
                     mon_cls: int = 0, mon_inst: int = 0, unmon_inst: int = 0,
                     suffix: str = '.cell') \

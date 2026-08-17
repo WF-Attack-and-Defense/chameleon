@@ -1,6 +1,8 @@
+import gc
+from typing import Dict, List, Optional, Sequence, Tuple, Union
+
 import numpy as np
 from sklearn.neighbors import NearestNeighbors
-from typing import List, Tuple, Dict
 
 
 def zscore_and_l2(X: np.ndarray, eps: float = 1e-8) -> np.ndarray:
@@ -24,6 +26,7 @@ def normalized_cross_correlation(
     selection_k: int,       # kept for API compatibility
     corr_threshold: float = 0.80,
     vec_len: int = 1000,
+    corr_batch_size: int = 256,
 ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
     """
     Group traces by high normalized cross-correlation of direction sequences.
@@ -32,7 +35,11 @@ def normalized_cross_correlation(
     - Do NOT remove any trace.
     - Return grouped traces (and grouped indices) containing all input traces exactly once.
     - If number of groups > trace_threshold, merge extra groups into kept groups.
+
+    Memory: avoids materializing a full n×n correlation matrix (which OOMs for
+    large selected pools). Uses chunked matmuls + union-find instead.
     """
+    del mon_inst, selection_k  # API compatibility only
     seqs = np.asarray(direction_traces, dtype=object)
     idx_set = np.asarray(idx_set, dtype=int)
 
@@ -40,41 +47,61 @@ def normalized_cross_correlation(
     if n == 0:
         return [], []
 
-    # 1) sequence -> fixed vectors
-    X = np.stack([s[:vec_len] for s in seqs], axis=0).astype(np.float32)
+    # 1) sequence -> fixed vectors (pad short sequences)
+    vl = int(vec_len)
+    X = np.zeros((n, vl), dtype=np.float32)
+    for i, s in enumerate(seqs):
+        arr = np.asarray(s, dtype=np.float32).ravel()
+        take = min(arr.size, vl)
+        if take > 0:
+            X[i, :take] = arr[:take]
 
-    # 2) normalize + correlation matrix
+    # 2) normalize (no full corr matrix)
     Xn = zscore_and_l2(X)
-    corr = Xn @ Xn.T
-    np.fill_diagonal(corr, 1.0)
 
-    # 3) connected components by correlation threshold
-    visited = np.zeros(n, dtype=bool)
-    groups_local: List[List[int]] = []
-    for i in range(n):
-        if visited[i]:
-            continue
-        stack = [i]
-        visited[i] = True
-        comp = []
-        while stack:
-            u = stack.pop()
-            comp.append(u)
-            nbrs = np.where(corr[u] >= corr_threshold)[0]
+    # 3) connected components via union-find + chunked row correlations
+    parent = np.arange(n, dtype=np.int32)
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = int(parent[x])
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    batch = max(1, int(corr_batch_size))
+    for start in range(0, n, batch):
+        end = min(start + batch, n)
+        # (batch, n) — peak ~ batch * n * 4 bytes instead of n * n * 4
+        corr_batch = Xn[start:end] @ Xn.T
+        for bi, i in enumerate(range(start, end)):
+            nbrs = np.where(corr_batch[bi] >= corr_threshold)[0]
             for v in nbrs:
-                if not visited[v]:
-                    visited[v] = True
-                    stack.append(v)
-        groups_local.append(comp)
+                if int(v) > i:
+                    union(i, int(v))
+        del corr_batch
 
-    # rank groups by size and cohesion
-    def group_score(g: List[int]) -> Tuple[int, float]:
+    roots = np.array([find(i) for i in range(n)], dtype=np.int32)
+    groups_map: Dict[int, List[int]] = {}
+    for i, r in enumerate(roots):
+        groups_map.setdefault(int(r), []).append(i)
+    groups_local: List[List[int]] = list(groups_map.values())
+
+    def mean_pairwise_corr(g: List[int]) -> float:
         if len(g) <= 1:
-            return (len(g), 0.0)
-        sub = corr[np.ix_(g, g)]
+            return 0.0
+        sub = Xn[np.asarray(g, dtype=int)]
+        # mean of upper-triangle of sub @ sub.T without full materialization when small
+        c = sub @ sub.T
         iu = np.triu_indices(len(g), k=1)
-        mean_corr = float(sub[iu].mean()) if iu[0].size > 0 else 0.0
-        return (len(g), mean_corr)
+        return float(c[iu].mean()) if iu[0].size > 0 else 0.0
+
+    def group_score(g: List[int]) -> Tuple[int, float]:
+        return (len(g), mean_pairwise_corr(g))
 
     groups_local = sorted(groups_local, key=group_score, reverse=True)
 
@@ -84,20 +111,18 @@ def normalized_cross_correlation(
     if len(groups_local) > k_groups:
         kept = [list(g) for g in groups_local[:k_groups]]
         overflow = groups_local[k_groups:]
-
+        kept_mat = [Xn[np.asarray(kg, dtype=int)].mean(axis=0) for kg in kept]
         for g in overflow:
-            g_arr = np.array(g, dtype=int)
+            g_vec = Xn[np.asarray(g, dtype=int)].mean(axis=0)
             best_j = 0
             best_sim = -np.inf
-            for j, kg in enumerate(kept):
-                kg_arr = np.array(kg, dtype=int)
-                # average pair correlation between overflow group and kept group
-                sim = float(corr[np.ix_(g_arr, kg_arr)].mean())
+            for j, km in enumerate(kept_mat):
+                sim = float(g_vec @ km)
                 if sim > best_sim:
                     best_sim = sim
                     best_j = j
             kept[best_j].extend(g)
-
+            kept_mat[best_j] = Xn[np.asarray(kept[best_j], dtype=int)].mean(axis=0)
         groups_local = kept
 
     # 5) Build outputs (all traces preserved)
@@ -108,60 +133,6 @@ def normalized_cross_correlation(
         g_arr = np.array(sorted(set(g)), dtype=int)
         grouped_traces.append(seqs[g_arr])
         grouped_indices.append(idx_set[g_arr])
-
-    return grouped_traces, grouped_indices
-
-    # rank groups: larger first, then higher internal mean corr
-    def group_score(g: List[int]) -> Tuple[int, float]:
-        if len(g) <= 1:
-            return (len(g), 0.0)
-        sub = corr[np.ix_(g, g)]
-        iu = np.triu_indices(len(g), k=1)
-        mean_corr = float(sub[iu].mean()) if iu[0].size > 0 else 0.0
-        return (len(g), mean_corr)
-
-    groups_local = sorted(groups_local, key=group_score, reverse=True)
-    groups_local = groups_local[: max(1, int(trace_threshold))]
-
-    # 4) class cap per group: keep at most selection_k // 2 for each class
-    max_per_class = max(1, int(selection_k) // 2)
-
-    grouped_traces: List[np.ndarray] = []
-    grouped_indices: List[np.ndarray] = []
-
-    for g in groups_local:
-        g_arr = np.array(g, dtype=int)
-        g_idx = idx_set[g_arr]
-        g_cls = g_idx // int(mon_inst)  # requested class rule
-
-        keep_mask = np.ones(len(g_arr), dtype=bool)
-
-        # process each class in this group
-        for c in np.unique(g_cls):
-            pos = np.where(g_cls == c)[0]
-            if len(pos) <= max_per_class:
-                continue
-
-            # remove centroid traces (most central first) until cap satisfied
-            sub_local = g_arr[pos]
-            sub_vec = Xn[sub_local]  # normalized vectors
-            centroid = sub_vec.mean(axis=0, keepdims=True)
-            centroid = zscore_and_l2(centroid)[0]
-
-            # similarity to centroid; higher -> more centroid-like
-            sim = sub_vec @ centroid
-            remove_num = len(pos) - max_per_class
-
-            # remove highest-similarity traces first (centroid traces)
-            remove_order = np.argsort(-sim)[:remove_num]
-            keep_mask[pos[remove_order]] = False
-
-        kept_local = g_arr[keep_mask]
-        if kept_local.size == 0:
-            continue
-
-        grouped_traces.append(seqs[kept_local])
-        grouped_indices.append(idx_set[kept_local])
 
     return grouped_traces, grouped_indices
 
@@ -326,6 +297,127 @@ def traces_selection(
     selected_indices = valid_indices[selected_indices_local].astype(int)
 
     return selected_traces, selected_indices
+
+
+def _parse_trace_light(fdir: str) -> np.ndarray:
+    """Lightweight (time, direction) loader for selection; avoids pandas overhead."""
+    rows: List[Tuple[float, float]] = []
+    with open(fdir, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            try:
+                rows.append((float(parts[0]), float(parts[1])))
+            except ValueError:
+                continue
+    if not rows:
+        return np.zeros((0, 2), dtype=np.float64)
+    return np.asarray(rows, dtype=np.float64)
+
+
+def traces_selection_from_files(
+    file_list: Sequence[str],
+    data_labels: np.ndarray,
+    k: int = 15,
+    select_ratio: float = 0.2,
+    min_select: int = 1,
+    alpha: float = 1.0,
+    beta: float = 1.0,
+    gamma: float = 2.0,
+    seq_len: int = 1000,
+    log_every: int = 10000,
+    logger=None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Same scoring as ``traces_selection``, but never holds the full dataset in RAM.
+
+    Pass 1: parse each file, keep only features for traces with length >= seq_len.
+    Pass 2: reload only the selected traces.
+    """
+    from utils.general import parse_trace
+
+    labels_all = np.asarray(data_labels, dtype=int)
+    n_total = len(file_list)
+    if n_total == 0:
+        return np.asarray([], dtype=object), np.asarray([], dtype=int)
+
+    features: List[np.ndarray] = []
+    valid_indices: List[int] = []
+    valid_labels: List[int] = []
+
+    for i, path in enumerate(file_list):
+        if logger is not None and log_every > 0 and (i + 1) % log_every == 0:
+            logger.info(
+                "Chameleon selection scan %d/%d (valid so far: %d)",
+                i + 1,
+                n_total,
+                len(valid_indices),
+            )
+        tr = _parse_trace_light(path)
+        if len(tr) < int(seq_len):
+            continue
+        features.append(trace_to_feature(tr))
+        valid_indices.append(i)
+        valid_labels.append(int(labels_all[i]))
+        del tr
+
+    if not valid_indices:
+        return np.asarray([], dtype=object), np.asarray([], dtype=int)
+
+    labels = np.asarray(valid_labels, dtype=int)
+    n = len(valid_indices)
+    if n == 1:
+        only = parse_trace(file_list[valid_indices[0]])
+        return np.asarray([only], dtype=object), np.asarray(valid_indices, dtype=int)
+
+    X = np.stack(features, axis=0).astype(np.float32)
+    del features
+    gc.collect()
+
+    mu = X.mean(axis=0, keepdims=True)
+    sigma = X.std(axis=0, keepdims=True) + 1e-6
+    Xn = (X - mu) / sigma
+    del X
+
+    k_eff = min(max(3, int(k)), n - 1)
+    knn = NearestNeighbors(n_neighbors=k_eff + 1, metric="euclidean", algorithm="auto")
+    knn.fit(Xn)
+    dists, nbrs = knn.kneighbors(Xn, return_distance=True)
+    dists = dists[:, 1:]
+    nbrs = nbrs[:, 1:]
+
+    scores = np.zeros(n, dtype=np.float32)
+    for i in range(n):
+        nn_idx = nbrs[i]
+        nn_dist = dists[i]
+        nn_lab = labels[nn_idx]
+        same_mask = nn_lab == labels[i]
+        diff_mask = ~same_mask
+        intra = float(np.mean(nn_dist[same_mask])) if np.any(same_mask) else float(np.max(nn_dist) + 1.0)
+        inter = float(np.mean(nn_dist[diff_mask])) if np.any(diff_mask) else float(np.max(nn_dist) + 1.0)
+        mislead = float(np.mean(diff_mask))
+        scores[i] = alpha * intra - beta * inter + gamma * mislead
+
+    m = max(int(np.ceil(select_ratio * n)), int(min_select))
+    m = min(m, n)
+    selected_local = np.sort(np.argsort(-scores)[:m])
+    selected_indices = np.asarray(valid_indices, dtype=int)[selected_local]
+
+    if logger is not None:
+        logger.info(
+            "Chameleon selection: %d valid / %d total, keeping %d; reloading selected traces",
+            n,
+            n_total,
+            len(selected_indices),
+        )
+
+    selected_traces = np.empty(len(selected_indices), dtype=object)
+    for j, idx in enumerate(selected_indices):
+        selected_traces[j] = parse_trace(file_list[int(idx)])
+
+    gc.collect()
+    return selected_traces, selected_indices.astype(int)
 
 
 def predataprocessing(

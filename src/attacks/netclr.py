@@ -22,6 +22,9 @@ class NetCLRAttack(Attack):
         super().__init__(args)
 
     def run(self, one_fold_only: bool = False):
+        if getattr(self.args, 'd', False):
+            return self.run_defense_training()
+
         # 1) Run pre-training when pretrained checkpoint is missing
         pretrained_path = os.path.join(self.args.checkpoints, "netclr", "NetCLR_pretrained.pth")
         if not os.path.isfile(pretrained_path):
@@ -43,6 +46,21 @@ class NetCLRAttack(Attack):
 
         # 2) Fine-tuning: closed-world or open-world based on --open-world (handled by base)
         super().run(one_fold_only=one_fold_only)
+
+    def run_defense_training(self) -> None:
+        pretrained_path = os.path.join(self.args.checkpoints, "netclr", "NetCLR_pretrained.pth")
+        if not os.path.isfile(pretrained_path):
+            self.logger.info("NetCLR pretrained checkpoint not found. Running SimCLR pre-training first.")
+            mon_mask = self.labels < self.nmc
+            run_pretrain(
+                self.args,
+                self.flist[mon_mask],
+                self.labels[mon_mask],
+                self.device,
+                self.logger,
+                seq_length=self.args.seq_length,
+            )
+        super().run_defense_training()
 
     def _build_model(self):
         model = NetCLRNet(num_classes=self.nc, seq_length=self.args.seq_length)

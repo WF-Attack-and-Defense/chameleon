@@ -23,7 +23,9 @@ def load_trained_model(model_class, checkpoint_path: str, device: Optional[torch
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f'Checkpoint not found: {checkpoint_path}. Please train the model first.')
     
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    # WFZoo writes its own checkpoints with non-tensor metadata (epoch, metrics, attack_type, ...);
+    # PyTorch >=2.6 defaults `weights_only=True` which rejects these. Trust the local file.
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
     # Create model instance
     model = model_class(**model_kwargs)
@@ -99,7 +101,8 @@ def load_checkpoint(filepath: str,
     if not os.path.exists(filepath):
         raise FileNotFoundError(f'Checkpoint not found: {filepath}')
     
-    checkpoint = torch.load(filepath, map_location=device)
+    # See load_trained_model: we save non-tensor metadata, so disable weights_only.
+    checkpoint = torch.load(filepath, map_location=device, weights_only=False)
     
     if model is not None and 'model_state_dict' in checkpoint:
         model.load_state_dict(checkpoint['model_state_dict'])
@@ -123,6 +126,48 @@ def del_checkpoint(filepath: str):
         logger.info(f"Checkpoint deleted: {filepath}")
     else:
         logger.warning(f"Checkpoint not found: {filepath}")
+
+
+def defense_final_model_path(
+    checkpoints_dir: str,
+    attack_type_name: str,
+    dataset: str,
+    open_world: bool = False,
+    seq_length: Optional[int] = None,
+) -> str:
+    """Path for ``{attack}_{dataset}_{CW|OW}_{seq_length}.h5`` (defense / ``-d`` training)."""
+    checkpoints_dir = os.path.normpath(checkpoints_dir)
+    suffix = "OW" if open_world else "CW"
+    if seq_length is not None:
+        return os.path.join(
+            checkpoints_dir,
+            f"{attack_type_name}_{dataset}_{suffix}_{int(seq_length)}.h5",
+        )
+    return os.path.join(checkpoints_dir, f"{attack_type_name}_{dataset}_{suffix}.h5")
+
+
+def save_defense_final_model(
+    model: torch.nn.Module,
+    checkpoints_dir: str,
+    attack_type_name: str,
+    dataset: str,
+    open_world: bool = False,
+    seq_length: Optional[int] = None,
+) -> str:
+    """
+    Save trained weights after ``run_attack.py -d`` (no fold checkpoints required).
+    """
+    os.makedirs(checkpoints_dir, exist_ok=True)
+    final_model_path = defense_final_model_path(
+        checkpoints_dir,
+        attack_type_name,
+        dataset,
+        open_world=open_world,
+        seq_length=seq_length,
+    )
+    torch.save(model.state_dict(), final_model_path)
+    logger.info("Final model saved to %s", final_model_path)
+    return final_model_path
 
 
 def save_final_model_and_cleanup(attack_type_name: str,
@@ -164,7 +209,9 @@ def save_final_model_and_cleanup(attack_type_name: str,
     for checkpoint_file in checkpoint_files:
         checkpoint_path = os.path.join(model_checkpoint_dir, checkpoint_file)
         try:
-            checkpoint = torch.load(checkpoint_path, map_location=device)
+            # WFZoo checkpoints store training metadata alongside weights; bypass
+            # PyTorch 2.6's `weights_only=True` default, which would refuse them.
+            checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
             epoch = checkpoint.get('epoch', 0)
             if epoch > best_epoch:
                 best_epoch = epoch
@@ -180,16 +227,14 @@ def save_final_model_and_cleanup(attack_type_name: str,
         logger.warning("No valid checkpoint found to save as final model")
         return
     
-    # Save final model as {model}_{dataset}_{CW|OW}.h5 or {model}_{dataset}_{CW|OW}_{seq_length}.h5
-    suffix = "OW" if open_world else "CW"
-    if seq_length is not None:
-        final_model_path = os.path.join(
-            checkpoints_dir, f"{attack_type_name}_{dataset}_{suffix}_{int(seq_length)}.h5"
-        )
-    else:
-        final_model_path = os.path.join(checkpoints_dir, f"{attack_type_name}_{dataset}_{suffix}.h5")
-    torch.save(best_model.state_dict(), final_model_path)
-    logger.info(f"Final model saved to {final_model_path}")
+    final_model_path = save_defense_final_model(
+        best_model,
+        checkpoints_dir,
+        attack_type_name,
+        dataset,
+        open_world=open_world,
+        seq_length=seq_length,
+    )
     
     # Delete all checkpoint files
     for checkpoint_file in checkpoint_files:

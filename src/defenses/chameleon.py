@@ -1,6 +1,7 @@
 import argparse
 import atexit
 import csv
+import gc
 import json
 import multiprocessing
 import os
@@ -14,11 +15,12 @@ from defenses.base import Defense
 from defenses.config import ChameleonConfig
 from utils.general import parse_trace, set_random_seed
 from utils.chameleon.predataprocessing import (
-    traces_selection,
+    traces_selection_from_files,
     normalized_cross_correlation,
 )
 from utils.chameleon.radixTrie import RadixTrie
-from utils.general import get_all_mon_flist_label, parse_all_mon_trace
+from utils.general import get_all_mon_flist_label
+
 
 def pack_directions(raw_dir: Union[np.ndarray, list]) -> np.ndarray:
     """
@@ -43,13 +45,17 @@ class ChameleonDefense(Defense):
             mon_inst=args.mon_inst,
             suffix=args.suffix,
         )
-        data_trace = parse_all_mon_trace(file_list)
+        self.logger.info(
+            "Chameleon init: %d monitored traces (classes=%d, inst=%d); streaming selection",
+            len(file_list),
+            args.mon_classes,
+            args.mon_inst,
+        )
 
-        self.data_traces = np.asarray(data_trace, dtype=object)
-        data_labels = np.asarray(data_labels, dtype=int)
-
-        selected_traces, idx_set = traces_selection(
-            self.data_traces,
+        # Stream features / reload only the selected subset — loading all
+        # 100×2000 traces into RAM OOMs on GTT23-scale datasets.
+        selected_traces, idx_set = traces_selection_from_files(
+            file_list,
             data_labels,
             k=self.config.selection_k,
             select_ratio=self.config.selection_ratio,
@@ -58,38 +64,20 @@ class ChameleonDefense(Defense):
             beta=self.config.selection_beta,
             gamma=self.config.selection_gamma,
             seq_len=self.config.selection_seq_len,
+            logger=self.logger,
         )
 
-        # Save to a npz file for evaluation
-
-        # _root = Path(__file__).resolve().parents[2]
-        # _chameleon_dir = _root / "defense_results" / "chameleon"
-        # _chameleon_dir.mkdir(parents=True, exist_ok=True)
-        # _npz_path = _chameleon_dir / f"selected_traces_and_idx_set_{args.dataset}.npz"
-        # np.savez_compressed(_npz_path, selected_traces=selected_traces, idx_set=idx_set)
-        # self.logger.info("Saved selected traces and idx_set to %s", _npz_path)
-
-
-        # save selected_traces and idx_set to a json file
-        # _json_path = _chameleon_dir / f"selected_traces_and_idx_set_{args.dataset}.json"
-        # payload = {
-        #     "selected_traces": [
-        #         np.asarray(tr, dtype=float).tolist() for tr in selected_traces
-        #     ],
-        #     "idx_set": np.asarray(idx_set, dtype=int).tolist(),
-        # }
-        # with open(_json_path, "w", encoding="utf-8") as f:
-        #     json.dump(payload, f)
-        # self.logger.info("Saved selected traces and idx_set to %s", _json_path)
-
-        # exit()
+        if len(selected_traces) == 0:
+            raise RuntimeError(
+                "Chameleon selection returned 0 traces. "
+                "Check selection_seq_len vs dataset trace lengths."
+            )
 
         idx_arr = np.asarray(idx_set, dtype=int)
         self.traces_idx: Dict[int, np.ndarray] = {
             int(idx): selected_traces[i] for i, idx in enumerate(idx_arr)
         }
 
-        # # Each trace as 1D directions in {1, -1} only
         self.direction_traces = np.array(
             [
                 pack_directions(np.asarray(tr)[:, 1])
@@ -100,24 +88,47 @@ class ChameleonDefense(Defense):
             dtype=object,
         )
 
-        self.grouped_traces, self.grouped_indices = normalized_cross_correlation(
+        self.logger.info(
+            "Chameleon grouping %d selected traces (chunked NCC)",
+            len(self.direction_traces),
+        )
+        _, grouped_indices = normalized_cross_correlation(
             direction_traces=self.direction_traces,
             idx_set=idx_set,
             mon_inst=args.mon_inst,
             trace_threshold=self.config.trace_threshold,
             selection_k=self.config.selection_k,
-            corr_threshold=0.80,   # tune if needed
+            corr_threshold=0.80,
             vec_len=self.config.selection_seq_len,
         )
 
-        #
-
-        self.grouped_index_sets = [set(map(int, g)) for g in self.grouped_indices]
-        self.selected_data_labels = data_labels[idx_set]
+        self.grouped_index_sets = [set(map(int, g)) for g in grouped_indices]
+        self.selected_data_labels = np.asarray(data_labels, dtype=int)[idx_arr]
         self.selected_traces = np.asarray(selected_traces, dtype=object)
-        self.selected_idx_set = np.asarray(idx_set, dtype=int)
+        self.selected_idx_set = idx_arr
         self.radix_trie: RadixTrie | None = None
+        # Do not retain the full monitored corpus.
+        self.data_traces = None
 
+        # Build trie once in the parent so forked workers share the read-only tree.
+        self.ensure_radix_trie()
+        gc.collect()
+        self.logger.info(
+            "Chameleon ready: selected=%d groups=%d trie_len=%d",
+            len(self.selected_traces),
+            len(self.grouped_index_sets),
+            int(self.config.radix_trie_build_length),
+        )
+
+    def __getstate__(self) -> Dict[str, object]:
+        # Bound-method pickling for Pool must not recurse through the trie.
+        # Workers rebuild via ensure_radix_trie() if needed.
+        state = self.__dict__.copy()
+        state["radix_trie"] = None
+        return state
+
+    def __setstate__(self, state: Dict[str, object]) -> None:
+        self.__dict__.update(state)
 
     def ensure_radix_trie(self) -> None:
         """
@@ -133,8 +144,7 @@ class ChameleonDefense(Defense):
             truncated[i] = np.asarray(self.direction_traces[i], dtype=int)[:cap]
         self.radix_trie = RadixTrie(truncated, self.selected_data_labels)
 
-  
-
+    
     @set_random_seed
     def _simulate(self, data_path: Union[str, os.PathLike]) -> np.ndarray:
         in_trace = parse_trace(data_path)
@@ -429,55 +439,6 @@ class ChameleonDefense(Defense):
                         break
             return target_ref[:target_ref_loc]
 
-        # def finalize_mutated_target(target_ref: np.ndarray, loc: int, min_len: int) -> np.ndarray:
-        #     """
-        #     Build a finalized mutated reference under length constraints:
-        #     - length >= min_len
-        #     - length <= floor(1.5 * min_len)
-        #     Return the candidate with the lowest inter-class separability.
-        #     """
-        #     nref = int(target_ref.shape[0])
-        #     if nref <= 0:
-        #         return target_ref
-        #     loc = max(0, min(int(loc), nref - 1))
-
-        #     min_len = max(1, int(min_len))
-        #     lower_bound = max(int(loc + 1), min_len)
-        #     upper_bound = min(nref, int(np.floor(1.5 * min_len)))
-
-        #     if upper_bound < lower_bound:
-        #         # Fall back to the longest allowed prefix from target_ref.
-        #         fallback_len = min(nref, max(int(loc + 1), min_len))
-        #         return np.asarray(target_ref[:fallback_len], dtype=float).copy()
-
-        #     best: Optional[np.ndarray] = None
-        #     best_score = float("inf")
-
-        #     # Evaluate every feasible candidate length and keep the lowest
-        #     # inter-class separability trace.
-        #     for final_len in range(lower_bound, upper_bound + 1):
-        #         cand = np.asarray(target_ref[:final_len], dtype=float).copy()
-        #         add_start = loc + 1
-
-        #         if add_start < final_len:
-        #             # Greedy direction tuning on the appended tail.
-        #             for idx in range(add_start, final_len):
-        #                 cand[idx, 1] = 1.0
-        #                 score_pos = separability_score(cand[:, 1])
-        #                 cand[idx, 1] = -1.0
-        #                 score_neg = separability_score(cand[:, 1])
-        #                 cand[idx, 1] = 1.0 if score_pos <= score_neg else -1.0
-
-        #         score = separability_score(cand[:, 1])
-        #         if score < best_score:
-        #             best_score = score
-        #             best = cand
-
-        #     if best is None:
-        #         return np.asarray(target_ref[:lower_bound], dtype=float).copy()
-        #     return best
-
-
         # Full 2D reference trace for the current morphing segment.
         target_ref: Optional[np.ndarray] = None
         mutation_location = -1 # the location of the mutation
@@ -485,10 +446,8 @@ class ChameleonDefense(Defense):
         L_start = -1
 
 
-        for L in range(2, n):
-            if L >= int(self.args.seq_length):
-                return self.finalize_morphing_trace(np.asarray(mixed, dtype=float))
-
+        max_L = min(n, int(self.args.seq_length))
+        for L in range(2, max_L):
             picked_ref = False
             # 1) Choose a reference trace when none is active for this segment.
             if target_ref is None:
@@ -499,13 +458,12 @@ class ChameleonDefense(Defense):
                     ms_list = list(matched_set)
                     if len(matched_set) > 1:
                         pick = int(ms_list[np.random.randint(0, len(ms_list))])
-                        target_ref = np.asarray(self.selected_traces[pick], dtype=float)
+                        target_ref = np.asarray(self.selected_traces[pick], dtype=float).copy()
                         picked_ref = True
-                    else: 
+                    else:
                         sel = int(np.random.randint(0, len(self.selected_idx_set)))
                         orig = int(self.selected_idx_set[sel])
-                        # target_ref = np.asarray(self.data_traces[orig], dtype=float)
-                        target_ref = np.asarray(self.traces_idx[orig], dtype=float)
+                        target_ref = np.asarray(self.traces_idx[orig], dtype=float).copy()
                         picked_ref = True
                 else:
                     matched_idxs = trace_match_cached(L)
@@ -514,7 +472,7 @@ class ChameleonDefense(Defense):
 
                     if 1 < len(matched_set) < 5:
                         pick = int(ms_list[np.random.randint(0, len(ms_list))])
-                        target_ref = np.asarray(self.selected_traces[pick], dtype=float)
+                        target_ref = np.asarray(self.selected_traces[pick], dtype=float).copy()
                         picked_ref = True
                     elif len(matched_set) == 1:
                         matched_orig = {int(self.selected_idx_set[i]) for i in matched_set}
@@ -523,14 +481,13 @@ class ChameleonDefense(Defense):
                                 gs = sorted(group_set)
                                 random_idx = int(np.random.randint(0, len(gs)))
                                 orig_idx = int(gs[random_idx])
-                                # target_ref = np.asarray(self.data_traces[orig_idx], dtype=float)
-                                target_ref = np.asarray(self.traces_idx[orig_idx], dtype=float)
+                                target_ref = np.asarray(self.traces_idx[orig_idx], dtype=float).copy()
                                 picked_ref = True
                                 break
-                        
+
                         if target_ref is None:
                             mi = int(next(iter(matched_set)))
-                            target_ref = np.asarray(self.selected_traces[mi], dtype=float)
+                            target_ref = np.asarray(self.selected_traces[mi], dtype=float).copy()
                             picked_ref = True
                     elif len(matched_set) == 0:
                         matched_idxs = trace_match_cached(L-1)
@@ -538,7 +495,7 @@ class ChameleonDefense(Defense):
                         ms_list = list(matched_set)
                         if len(matched_set) > 1:
                             pick = int(ms_list[np.random.randint(0, len(ms_list))])
-                            target_ref = np.asarray(self.selected_traces[pick], dtype=float)
+                            target_ref = np.asarray(self.selected_traces[pick], dtype=float).copy()
                             picked_ref = True
 
             if picked_ref and target_ref is not None:
@@ -580,23 +537,10 @@ class ChameleonDefense(Defense):
 
 
 
-                    # loc = 0
-                    # nref = int(target_ref.shape[0])
-                    # tL = float(trace_arr[L, 0])
-                    # while loc < nref and float(target_ref[loc, 0]) < tL:
-                    #     loc += 1
-                    # if loc < nref:
-                    #     mixed.extend(target_ref[loc:].tolist())
-                    # else:
-                    #     mixed.append([tL, float(trace_arr[L, 1])])
-                    # break
-
         if self.config.mutation == 1 and target_ref is not None:
             # Input has terminated: finalize the timing of the mutated reference trace.
             finalized_ref = mutation_morphing(trace_arr, target_ref, L_start)
             
-            # final_loc = int(mutation_location) if mutation_location != -1 else int(last_loc)
-            # finalized_ref = finalize_mutated_target(np.asarray(target_ref, dtype=float), final_loc, trace_arr.shape[0])
 
             mixed.extend(finalized_ref[1:].tolist())
 

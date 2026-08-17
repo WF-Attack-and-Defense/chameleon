@@ -90,21 +90,13 @@ def calc_single_ovhd(ff):
     if len(nt) < 50 or len(ot) < 50:
         return None, None, None, None
 
-    # new_real_trace = nt[abs(nt[:, 1]) == 1].copy()
-    # if len(new_real_trace) < 50:
-    #     return None, None, None, None
-    # new_real_trace = nt
-
-    # compute data overhead
-    n_total = len(nt)
-    n_real = len(ot)
-    n_dummy = abs(n_total - n_real)
-    # compute time overhead
-    # index_99 = int(100 * len(ot))
-    old_time = ot[-1, 0]
-    # index_99 = int(100 * len(new_real_trace))
-    new_time = nt[-1, 0]
-    return n_dummy, n_real, old_time, new_time
+    # |P| and |P'|: total number of cells in original and defended traces
+    n_original = len(ot)
+    n_defended = len(nt)
+    # t_|P| and t_k: transmission time of original and defended traces
+    t_original = ot[-1, 0]
+    t_defended = nt[-1, 0]
+    return n_original, n_defended, t_original, t_defended
 
 
 def parallel(flist, n_jobs):
@@ -132,13 +124,12 @@ if __name__ == '__main__':
     ovhds = parallel(flist, args.n_jobs)
     ovhds = list(zip(*ovhds))
 
-    # print(ovhds[0])
+    n_original = sum(list(filter(None, ovhds[0])))
+    n_defended = sum(list(filter(None, ovhds[1])))
+    t_original = sum(list(filter(None, ovhds[2])))
+    t_defended = sum(list(filter(None, ovhds[3])))
 
-    n_dummys = sum(list(filter(None, ovhds[0])))
-    n_reals = sum(list(filter(None, ovhds[1])))
-    old_times = sum(list(filter(None, ovhds[2])))
-    new_times = sum(list(filter(None, ovhds[3])))
-
-    print(n_dummys, n_reals, new_times, old_times)
-
-    print("{} {:.4f} {:.4f}".format(len(flist), n_dummys / n_reals * 1.0, (new_times - old_times) / old_times))
+    # B(D) = (|P'| - |P|) / |P|,  L(D) = (t_k - t_|P|) / t_|P|
+    bandwidth_ovhd = (n_defended - n_original) / n_original
+    latency_ovhd = (t_defended - t_original) / t_original
+    print("{} {:.4f} {:.4f}".format(len(flist), bandwidth_ovhd, latency_ovhd))

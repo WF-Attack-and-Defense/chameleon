@@ -10,7 +10,7 @@ from sklearn.model_selection import StratifiedShuffleSplit
 from ignite.engine import create_supervised_evaluator
 from ignite.metrics import Loss
 
-from attacks import DFAttack, RFAttack, VarCNNAttack, AWFAttack, TiktokAttack, NetCLRAttack
+from attacks import DFAttack, RFAttack, VarCNNAttack, NetCLRAttack
 from utils.general import get_flist_label
 from utils.metric import WFMetric
 
@@ -46,8 +46,6 @@ def load_attack_model(args: argparse.Namespace):
         'df': DFAttack,
         'rf': RFAttack,
         'var_cnn': VarCNNAttack,
-        'awf': AWFAttack,
-        'tiktok': TiktokAttack,
         'netclr': NetCLRAttack,
     }
     
@@ -115,7 +113,7 @@ def verify_defense_with_attack(args: argparse.Namespace, logger):
     # Use same 90/10 split as attacks
     sss = StratifiedShuffleSplit(n_splits=1, test_size=0.1, random_state=2024)
     train_index, test_index = next(sss.split(defended_flist, defended_labels))
-    
+
     train_list = defended_flist[train_index]
     train_labels = defended_labels[train_index]
     test_list = defended_flist[test_index]

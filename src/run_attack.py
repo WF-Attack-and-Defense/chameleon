@@ -3,14 +3,14 @@ import os
 
 import torch
 
-from attacks import DFAttack, TiktokAttack, RFAttack, VarCNNAttack, AWFAttack, NetCLRAttack
+from attacks import DFAttack, RFAttack, VarCNNAttack, NetCLRAttack
 from utils.general import seed_everything
 
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description='WF transfer project')
-    parser.add_argument('--attack', choices=['df', 'tiktok', 'rf', 'var_cnn', 'awf', 'netclr'], default='df', help='choose the attack')
-    parser.add_argument('--dataset', choices=['DF', 'ds-19', 'defense', 'test'], default='DF', help='choose the dataset')
+    parser.add_argument('--attack', choices=['df', 'rf', 'var_cnn', 'netclr'], default='df', help='choose the attack')
+    parser.add_argument('--dataset', choices=['DF', 'GTT23', 'defense', 'test', 'ds-19'], default='DF', help='choose the dataset')
 
     parser.add_argument('--checkpoints', type=str, default='../checkpoints/',
                         help='location of model checkpoints')
@@ -30,6 +30,13 @@ def parse_arguments():
 
     parser.add_argument('-j', '--workers', default=10, type=int, metavar='N',
                         help='number of data loading workers (default: 10)')
+    
+    parser.add_argument(
+        '-d',
+        action='store_true',
+        default=False,
+        help='defense evaluation: use all traces (no CV holdout) and save checkpoint',
+    )
 
     # GPU
     parser.add_argument('--use_gpu', type=bool, default=True, help='use gpu')
@@ -64,18 +71,18 @@ if __name__ == '__main__':
         args.mon_classes = 100
         args.mon_inst = 100
         args.unmon_inst = 10000
-    elif args.dataset == 'defense':
-        args.mon_path = '../defense_results/chameleon/OW/ds-19_2/'
-        args.unmon_path = '../defense_results/chameleon/OW/ds-19_2/'
+    elif args.dataset == 'GTT23':
+        args.mon_path = data_path + 'GTT23/CW/'
+        args.unmon_path = data_path + 'GTT23/OW/'
         args.mon_classes = 100
-        args.mon_inst = 100
-        args.unmon_inst = 10000
-    elif args.dataset == 'test':
-        args.mon_path = '../defense_results/minipatch/CW/DF_netclr/'
-        args.unmon_path = '../defense_results/minipatch/OW/DF_netclr/'
-        args.mon_classes = 95
         args.mon_inst = 1000
-        args.unmon_inst = 40716
+        args.unmon_inst = 10000
+    elif args.dataset == 'defense':
+        args.mon_path = '../defense_results/chameleon/CW/ds-19_0708_224220'
+        args.unmon_path = '../defense_results/chameleon/OW/ds-19_0708_224230'
+        args.mon_classes = 100
+        args.mon_inst = 1000
+        args.unmon_inst = 10000
     else:
         raise ValueError(f"Dataset {args.dataset} not supported")
 
@@ -90,17 +97,16 @@ if __name__ == '__main__':
     attack = None
     if args.attack == 'df':
         attack = DFAttack(args)
-    elif args.attack == 'tiktok':
-        attack = TiktokAttack(args)
     elif args.attack == 'rf':
         attack = RFAttack(args)
     elif args.attack == 'var_cnn':
         attack = VarCNNAttack(args)
-    elif args.attack == 'awf':
-        attack = AWFAttack(args)
     elif args.attack == 'netclr':
         attack = NetCLRAttack(args)
     else:
         raise NotImplementedError("Attack not implemented")
 
-    attack.run(args.one_fold)
+    if args.d:
+        attack.run_defense_training()
+    else:
+        attack.run(args.one_fold)

@@ -5,31 +5,18 @@ from typing import List, Union
 
 import numpy as np
 
-from defenses import FrontDefense, RegulatorDefense, WtfpadDefense, TrafficSliverDefense, MinipatchDefense, DynaflowDefense, PaletteDefense, MockingbirdDefense, GapdisDefense, ChameleonDefense, SurakavDefense, AlertDefense
-from utils.general import get_flist_label, get_all_mon_flist_label, parse_all_mon_trace,timeit, init_directories
-from utils.perturb_util import verify_defense_with_attack
+from defenses import ChameleonDefense
+from utils.general import get_flist_label, timeit
 
 defense_funcs = {
-    'wtfpad': WtfpadDefense,
-    'front': FrontDefense,
-    'regulator': RegulatorDefense,
-    'trafficsliver': TrafficSliverDefense,
-    'minipatch': MinipatchDefense,
-    'dynaflow': DynaflowDefense,
-    'palette': PaletteDefense,
-    'mockingbird': MockingbirdDefense,
     'chameleon': ChameleonDefense,
-    'gapdis': GapdisDefense,
-    'surakav': SurakavDefense,
-    'alert': AlertDefense,
 }
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description='WF transfer project')
-    parser.add_argument('--defense', type=str, help='choose the defense')
-    parser.add_argument('--attack', choices=['df', 'tiktok', 'rf', 'var_cnn', 'awf', 'netclr'], default=None, help='choose the attack')
+    parser.add_argument('--defense', choices=['chameleon'], default='chameleon', help='choose the defense')
     # paths and file config
-    parser.add_argument('--dataset', choices=['DF', 'ds-19', 'test'], default='DF', help='choose the dataset')
+    parser.add_argument('--dataset', choices=['DF', 'ds-19', 'GTT23', 'test'], default='DF', help='choose the dataset')
     parser.add_argument('--checkpoints', type=str, default='../checkpoints/',
                         help='location of model checkpoints')
     # config-path
@@ -49,18 +36,6 @@ def parse_arguments():
     parser.add_argument('--suffix', type=str, default='.cell', help='suffix of the output file')
     parser.add_argument('--open-world', default=False, action="store_true", help='Open world or not')
     parser.add_argument('--seq-length', default=5000, type=int, help='The input trace length')
-    parser.add_argument(
-        '--no-alert-auto-train',
-        action='store_true',
-        default=False,
-        help='ALERT only: skip GAN training when generator weights are missing',
-    )
-    parser.add_argument(
-        '--alert-force-train',
-        action='store_true',
-        default=False,
-        help='ALERT only: retrain generators even if all generator_site_*.pt exist',
-    )
     parser.add_argument('--batch-size', default=128, type=int, metavar='N', help='mini-batch size (default: 128)')
 
     # nworkers
@@ -73,6 +48,17 @@ def parse_arguments():
     _args = parser.parse_args()
     return _args
 
+# Module-level handle so Pool workers inherit the defense via fork instead of
+# pickling a multi-GB bound method for every task chunk (OOM on GTT23-scale).
+_DEFENSE_WORKER = None
+
+
+def _simulate_one(data_path: str) -> None:
+    # Dump happens inside simulate(); never return the ndarray — Pool.map would
+    # accumulate ~200k traces in the parent and OOM on GTT23-scale datasets.
+    _DEFENSE_WORKER.simulate(data_path)
+
+
 @timeit
 def parallel_simulate(flist: Union[List[str], np.ndarray], defense, workers: int):
     """
@@ -83,8 +69,18 @@ def parallel_simulate(flist: Union[List[str], np.ndarray], defense, workers: int
         defense: Defense instance
         workers: Number of worker processes
     """
+    global _DEFENSE_WORKER
+    _DEFENSE_WORKER = defense
+    if hasattr(defense, "ensure_radix_trie"):
+        defense.ensure_radix_trie()
+    n = len(flist)
+    workers = max(1, int(workers))
+    # Moderate chunks: fewer IPC round-trips, without buffering huge result batches.
+    chunksize = max(1, min(64, n // (workers * 8) if n else 1))
     with Pool(workers) as p:
-        p.map(defense.simulate, flist)
+        # imap_unordered avoids holding the full result list; workers return None.
+        for _ in p.imap_unordered(_simulate_one, flist, chunksize=chunksize):
+            pass
 
 if __name__ == '__main__':
     args = parse_arguments()
@@ -111,6 +107,12 @@ if __name__ == '__main__':
         args.mon_classes = 100
         args.mon_inst = 100
         args.unmon_inst = 10000
+    elif args.dataset == 'GTT23':
+        args.mon_path = data_path + 'GTT23/CW/'
+        args.unmon_path = data_path + 'GTT23/OW/'
+        args.mon_classes = 100
+        args.mon_inst = 1000
+        args.unmon_inst = 10000
     else:
         raise ValueError(f"Dataset {args.dataset} not supported")
 
@@ -123,24 +125,11 @@ if __name__ == '__main__':
         args.unmon_path = None
         args.output_dir = str(Path(args.output_dir) / args.defense / 'CW')
     
-    if args.defense in defense_funcs:
-        if args.defense == 'gapdis' or args.defense == 'minipatch':
-            if args.attack not in ['df', 'tiktok', 'rf', 'var_cnn', 'awf', 'netclr']:
-                raise ValueError(f"Attack {args.attack} not supported for gapdis defense")
-            if args.attack == None:
-                raise ValueError("Attack is required for gapdis defense")
-    else:
+    if args.defense not in defense_funcs:
         raise NotImplementedError(f"Defense {args.defense} not implemented")
 
     # Get file list and labels
     flist, labels = get_flist_label(args.mon_path, args.unmon_path, mon_cls=args.mon_classes, mon_inst=args.mon_inst, unmon_inst=args.unmon_inst, suffix=args.suffix)
- 
-    if args.defense == 'gapdis':
-        GapdisDefense(args, flist, labels)
-    else:
-        if args.defense == 'alert':
-            from defenses.alert import maybe_train_alert_generators
 
-            maybe_train_alert_generators(args, flist, labels)
-        defense = defense_funcs[args.defense](args)
-        parallel_simulate(flist, defense, args.workers)
+    defense = defense_funcs[args.defense](args)
+    parallel_simulate(flist, defense, args.workers)
