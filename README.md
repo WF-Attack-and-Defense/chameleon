@@ -5,9 +5,14 @@ To support the latest graphics devices, we tested the code under Python 3.10.
 
 ## How to use
 ### Install dependencies
-
+1. Python
 ```bash
 pip install -r requirements.txt
+```
+2. Conda
+```bash
+conda env create -f py310.yml
+conda activate py310
 ```
 
 ### Dataset Format
