@@ -20,6 +20,10 @@ It has been a convention to name a trace as "A-B.cell" or "C.cell".
 A is the class number of the trace, and B is the instance number of the trace. 
 "C.cell" is the C-th non-monitored trace in the dataset.
 
+Extract sample dataset
+```
+tar -xJf ds-19.tar.xz
+```
 
 #### Defended dataset generation
 ```bash
