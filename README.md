@@ -1,4 +1,4 @@
-# Chameleon: Robust Website Fingerprinting Defense via Many-to-Many Traffic Morphing
+# Chameleon: Robust Defense Against Tor Website Fingerprinting via Many-to-Many Traffic Morphing
 To support the latest graphics devices, we tested the code under Python 3.10.
 
 :warning: :warning: :warning: This software is a research prototype intended solely for experimental and evaluation purposes. :warning: :warning: :warning:
